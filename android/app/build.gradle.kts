@@ -67,7 +67,7 @@ val signRelease by tasks.registering(Exec::class) {
 tasks.matching { it.name == "assembleRelease" }.configureEach { finalizedBy(signRelease) }
 
 dependencies {
-    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    implementation(fileTree("libs") { include("*.aar", "*.jar") })
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.android.filament:filament-android:1.75.1")
     implementation("com.google.android.filament:gltfio-android:1.75.1")
