@@ -15,7 +15,7 @@ android {
         targetSdk = 36
         versionCode = 39
         versionName = "1.2.0"
-        ndk { abiFilters += providers.gradleProperty("openrayneo.abis").orElse("arm64-v8a").get().split(',') }
+        ndk { abiFilters += providers.gradleProperty("openrayneo.abis").orElse("arm64-v8a,x86_64").get().split(',') }
     }
     buildTypes {
         getByName("release") {
