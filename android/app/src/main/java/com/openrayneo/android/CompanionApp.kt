@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.BluetoothSearching
 import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -47,7 +48,7 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
     ) {
         if (route.isNotEmpty())
             route =
-                if (route in listOf("model", "computer", "diagnostics", "voice-settings", "voice-profiles", "device-settings", "content", "teleprompter", "agent-api") && !model.onboarding)
+                if (route in listOf("model", "computer", "diagnostics", "voice-settings", "voice-profiles", "device-settings", "content", "teleprompter", "agent-api", "reader") && !model.onboarding)
                     "settings"
                 else ""
         else if (model.onboarding) model.step(model.onboardingStep - 1) else tab = 0
@@ -78,6 +79,7 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
                                 "content" -> L("首页与内容", "Home & Content")
                                 "teleprompter" -> L("提词资料", "Teleprompter")
                                 "agent-api" -> L("DSH Go 与外部 Agent", "DSH Go & Agents")
+                                "reader" -> L("小说阅读", "Reader")
                                 else -> listOf("OpenRayneo", L("导航", "Navigation"), L("助手", "Assistant"), L("记录", "Records"))[tab]
                             }
                         )
@@ -181,6 +183,7 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
                 "content" -> CompanionContentScreen(model)
                 "teleprompter" -> TeleprompterScreen(model)
                 "agent-api" -> AgentServerScreen(model, actions.bluetoothPermission)
+                "reader" -> ReaderScreen(actions.importBook)
                 else ->
                     if (model.onboarding)
                         OnboardingScreen(model, actions, { devices = true }, { route = it })
@@ -358,6 +361,7 @@ private fun GlassesScreen(
                     Triple(L("首页与内容", "Home & Content"), Icons.Outlined.Dashboard) { configure("content") },
                     Triple(L("提词稿库", "Teleprompter"), Icons.AutoMirrored.Outlined.Article) { configure("teleprompter") },
                     Triple(L("外部 Agent", "External Agents"), Icons.Outlined.Hub) { configure("agent-api") },
+                    Triple(L("小说阅读", "Reader"), Icons.AutoMirrored.Outlined.MenuBook) { configure("reader") },
                 )
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 tiles.chunked(3).forEach { row ->

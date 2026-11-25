@@ -60,6 +60,19 @@ internal class MainActivity : ComponentActivity() {
                     model.importConfig(JSONObject(String(bytes, Charsets.UTF_8)))
                 }
         }
+    private val importBook =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) model.attempt {
+                runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                val repository = ReaderRepository(this)
+                val book = repository.import(uri) { target ->
+                    contentResolver.openInputStream(target)?.use { it.readBytes() }
+                        ?: error("无法读取所选文件")
+                }
+                val chapters = repository.chapters(book, ReaderConfig())
+                model.notice = "已导入《${book.title}》，共 ${chapters.size} 章、${book.totalBytes} 字节"
+            }
+        }
     private val speech =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode == RESULT_OK) {
@@ -136,6 +149,7 @@ internal class MainActivity : ComponentActivity() {
                         importConfig = {
                             importFile.launch(arrayOf("application/json", "text/plain"))
                         },
+                        importBook = { importBook.launch(arrayOf("text/plain", "text/*", "application/octet-stream")) },
                         voice = { source ->
                             model.attempt {
                                 voiceSource = source
@@ -256,6 +270,7 @@ internal data class UiActions(
     val appSettings: () -> Unit,
     val openGaode: () -> Unit,
     val importConfig: () -> Unit,
+    val importBook: () -> Unit,
     val voice: (AnswerSource) -> Unit,
     val switchOfficialApp: (Boolean) -> Unit,
 )
