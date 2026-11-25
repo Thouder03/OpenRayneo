@@ -150,6 +150,7 @@ internal class MainActivity : ComponentActivity() {
                             importFile.launch(arrayOf("application/json", "text/plain"))
                         },
                         importBook = { importBook.launch(arrayOf("text/plain", "text/*", "application/octet-stream")) },
+                        readerSeek = { _, _, _ -> /* Phase 3：转发到提词器 seek */ },
                         voice = { source ->
                             model.attempt {
                                 voiceSource = source
@@ -271,6 +272,8 @@ internal data class UiActions(
     val openGaode: () -> Unit,
     val importConfig: () -> Unit,
     val importBook: () -> Unit,
+    /** 阅读位置变化；Phase 3 接入眼镜提词器后在此推送 type 8 seek。 */
+    val readerSeek: (String, Int, Int) -> Unit,
     val voice: (AnswerSource) -> Unit,
     val switchOfficialApp: (Boolean) -> Unit,
 )

@@ -61,7 +61,8 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
     }
     Scaffold(
         topBar = {
-            if (!model.onboarding || route.isNotEmpty())
+            // "reader" 自带全屏沉浸界面（正文 + 自绘 Overlay），不能再套一层应用栏。
+            if (route != "reader" && (!model.onboarding || route.isNotEmpty()))
                 TopAppBar(
                     title = {
                         Text(
@@ -183,7 +184,10 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
                 "content" -> CompanionContentScreen(model)
                 "teleprompter" -> TeleprompterScreen(model)
                 "agent-api" -> AgentServerScreen(model, actions.bluetoothPermission)
-                "reader" -> ReaderScreen(actions.importBook)
+                "reader" ->
+                    ReaderScreen(actions.importBook) { bookId, chapterIndex, byteOffsetInChapter ->
+                        actions.readerSeek(bookId, chapterIndex, byteOffsetInChapter)
+                    }
                 else ->
                     if (model.onboarding)
                         OnboardingScreen(model, actions, { devices = true }, { route = it })

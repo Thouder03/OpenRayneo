@@ -135,6 +135,9 @@ val prepareVoiceModels by tasks.registering {
 
     outputs.files(aarFile, campplusFile, sileroFile, segmentationFile)
 
+    // 输出全在就不跑：否则每次构建都重跑下载探测，镜像不可达时每个都要等 120s 超时。
+    outputs.upToDateWhen { aarFile.exists() && campplusFile.exists() && sileroFile.exists() && segmentationFile.exists() }
+
     doLast {
         voiceLibsDir.mkdirs()
         voiceAssetsDir.mkdirs()
