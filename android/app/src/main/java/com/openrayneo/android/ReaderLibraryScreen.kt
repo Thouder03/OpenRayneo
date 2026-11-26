@@ -20,26 +20,31 @@ import androidx.lifecycle.LifecycleEventObserver
 
 /** 书架：导入 TXT、列出已导入图书并从上次进度继续阅读。 */
 @Composable
-internal fun BookLibraryScreen(importBook: () -> Unit, open: (Book) -> Unit) {
+internal fun BookLibraryScreen(
+    importBook: () -> Unit,
+    open: (Book) -> Unit,
+    importing: Boolean = false,
+    libraryVersion: Int = 0,
+) {
     val context = LocalContext.current
     val repository = remember { ReaderRepository(context) }
     var books by remember { mutableStateOf(repository.books()) }
-    var importing by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf<Book?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
 
-    // 文件选择器回来会触发 ON_RESUME：此时重新读盘才能看到刚导入的书，
-    // 导入进度也在这里收尾，否则选择器返回后进度条会永久卡住。
+    // 文件选择器回来会触发 ON_RESUME：此时重新读盘才能看到刚导入的书。
+    // 实际导入在 IO 线程继续跑，完成后由 libraryVersion 通知这里再刷一次。
     DisposableEffect(lifecycle) {
         val observer =
             LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) {
-                    books = repository.books()
-                    importing = false
-                }
+                if (event == Lifecycle.Event.ON_RESUME) books = repository.books()
             }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(libraryVersion) {
+        if (libraryVersion > 0) books = repository.books()
     }
 
     LazyColumn(
@@ -57,7 +62,7 @@ internal fun BookLibraryScreen(importBook: () -> Unit, open: (Book) -> Unit) {
         }
         item {
             ToolButton(
-                onClick = { importing = true; importBook() },
+                onClick = importBook,
                 enabled = !importing,
                 modifier = Modifier.fillMaxWidth(),
             ) {

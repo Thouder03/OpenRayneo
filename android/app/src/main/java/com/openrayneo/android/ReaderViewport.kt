@@ -7,6 +7,9 @@ package com.openrayneo.android
  * 没有任何 Android 依赖；翻页边界、跨章切换、进度条映射都在这里定死，UI 只负责画。
  *
  * 方案 B：手机 N 字/行只决定排版，M 决定一次视口移动几行；眼镜自行排版并按字节高亮。
+ *
+ * 内存纪律：任何时候只有当前章（以及为章间衔接准备的一两个邻章的**行**）驻留内存。
+ * 章节正文按需从磁盘读取，不再整本驻留。
  */
 internal class ReaderViewport(
     val chapters: List<Chapter>,
@@ -17,11 +20,15 @@ internal class ReaderViewport(
     var byteOffset: Int = 0
         private set
 
-    private var lines: List<String> = emptyList()
-    private var cellUnits: IntArray = IntArray(0)
+    /** 当前章解析结果：排版行 + 格→字节表。换章才重算。 */
+    private var text: ChapterText = ChapterText("", config.charsPerLine)
+
+    /** 邻章行缓存：只保留章间衔接用的一小段，且只有当前章前后两章。 */
+    private var neighbourIndex: Int = -1
+    private var neighbour: ChapterText? = null
 
     val chapter: Chapter get() = chapters[chapterIndex]
-    val linesOfChapter: List<String> get() = lines
+    val linesOfChapter: List<String> get() = text.lines
 
     /** 当前章内的字节偏移。提词器 highLightOffset 用的就是它。 */
     val byteOffsetInChapter: Int get() = (byteOffset - chapter.byteStart).coerceIn(0, chapter.byteLength)
@@ -29,7 +36,7 @@ internal class ReaderViewport(
     /** 全书字节偏移。 */
     val bookOffset: Int get() = chapter.byteStart + byteOffsetInChapter
 
-    val lineOfViewport: Int get() = ReaderText.lineOfByte(chapter, byteOffsetInChapter, lines)
+    val lineOfViewport: Int get() = text.lineOfByte(byteOffsetInChapter)
 
     /** 本章内进度 0f..1f，供进度条显示。 */
     val progressInChapter: Float
@@ -54,18 +61,20 @@ internal class ReaderViewport(
         loadChapter(index.coerceIn(0, chapters.lastIndex), byteOffsetInChapter)
     }
 
-    val lineCount: Int get() = lines.size
+    val lineCount: Int get() = text.lineCount
 
-    /** 邻章排版行（含缓存）。只用于章间衔接，不参与当前章的位置计算。 */
+    /**
+     * 邻章排版行。只为衔接接口取用，绝不把整章留在内存里：
+     * 上一章取末尾、下一章取开头，各 M 行足够；桥接另一侧时重新解析即可。
+     */
     fun neighbourLines(index: Int): List<String> {
         if (index !in chapters.indices) return emptyList()
-        neighbourCache[index]?.let { return it }
-        val computed = ReaderText.linesOf(chapters[index], config.charsPerLine)
-        neighbourCache[index] = computed
-        return computed
+        if (neighbourIndex == index) neighbour?.let { return it.lines }
+        val parsed = ReaderText.chapterView(chapters[index], config.charsPerLine)
+        neighbourIndex = index
+        neighbour = parsed
+        return parsed.lines
     }
-
-    private val neighbourCache = HashMap<Int, List<String>>()
 
     /** 视口所在行（0 基），进度条与高亮共用同一个基准。 */
     val lineIndex: Int get() = lineOfViewport
@@ -74,10 +83,14 @@ internal class ReaderViewport(
     val lineProgress: Float
         get() = if (lineCount <= 1) 0f else lineIndex.toFloat() / (lineCount - 1)
 
-    /** 章内进度条拖动：按整章行数定位，滑到哪一行就停在哪一行。 */
+    /**
+     * 章内进度条拖动：按整章行数定位，滑到哪一行就停在哪一行。
+     * 空行不占显示格，直接映射到空行行首会让 [lineIndex] 立刻跳回上一个非空行，
+     * 所以先把目标行对齐到它自己或其后第一个非空行，两边下标才一致。
+     */
     fun seekLine(line: Int) {
-        val target = line.coerceIn(0, lines.lastIndex.coerceAtLeast(0))
-        byteOffset = chapter.byteStart + ReaderText.lineByteStart(chapter, target, lines)
+        val target = line.coerceIn(0, text.lineCount - 1)
+        byteOffset = chapter.byteStart + text.lineByteStart(text.nonBlankLine(target))
     }
 
     /**
@@ -89,12 +102,10 @@ internal class ReaderViewport(
      */
     fun moveCells(steps: Int): Boolean {
         if (steps == 0) return true
-        // 「已经停在章末最后一行」就是阅读意义上的书末，先判并返回 false，
-        // 否则下面的落位会把偏移改回倒数第一行，造成永远可继续往前、atBookEnd 永远不成立。
         if (steps > 0 && chapterIndex == chapters.lastIndex && lineIndex >= lineCount - 1) return false
         if (steps < 0 && chapterIndex == 0 && lineIndex <= 0) return false
 
-        val target = currentCell() + steps
+        val target = text.cellOfByte(byteOffsetInChapter) + steps
         if (target < 0) {
             if (chapterIndex == 0) return false
             // 先落在本章第一行（衔接处不跳）；已在第一行再往前才退回上一章末尾。
@@ -103,13 +114,13 @@ internal class ReaderViewport(
                 return true
             }
             loadChapter(chapterIndex - 1, 0)
-            seekLine(lines.lastIndex)
+            seekLine(lineCount - 1)
             return true
         }
-        if (target >= cellUnits.size) {
+        if (target >= text.cellUnits.size) {
             // 还没到章末：停在最后一行，下一章就在下方接着显示。
-            if (lineIndex < lineCount - 1) {
-                seekLine(lines.lastIndex)
+            if (!atChapterEnd) {
+                seekLine(lineCount - 1)
                 return true
             }
             // 已停在章末：再翻就进下一章，衔接处不断。（上面已排除最后一章）
@@ -117,7 +128,7 @@ internal class ReaderViewport(
             seekLine(0)
             return true
         }
-        byteOffset = chapter.byteStart + cellAt(target)
+        byteOffset = chapter.byteStart + text.cellAt(target)
         return true
     }
 
@@ -154,7 +165,7 @@ internal class ReaderViewport(
 
     /** 当前高亮行范围：以视口行居中，覆盖 M 行，并夹在本章行范围内。 */
     fun highlightRange(): IntRange {
-        val total = lines.size
+        val total = lineCount
         val span = config.displayLines.coerceAtMost(total).coerceAtLeast(1)
         var start = lineOfViewport - (span - 1) / 2
         if (start + span > total) start = total - span
@@ -168,21 +179,12 @@ internal class ReaderViewport(
         byteOffset = chapter.byteStart + byteOffsetInChapter.coerceIn(0, chapter.byteLength)
     }
 
+    /** 只重新解析当前章；顺手丢掉不再相邻的邻章缓存。 */
     private fun reload() {
-        lines = ReaderText.linesOf(chapter, config.charsPerLine)
-        cellUnits = ReaderText.cellUnits(chapter)
-    }
-
-    /** 当前字节偏移对应的章内显示格下标。 */
-    private fun currentCell(): Int {
-        if (cellUnits.isEmpty()) return 0
-        val index = cellUnits.indexOfFirst { it >= byteOffsetInChapter }
-        return if (index < 0) cellUnits.lastIndex else index
-    }
-
-    /** 章内显示格下标对应的章内字节偏移。 */
-    private fun cellAt(cell: Int): Int {
-        if (cellUnits.isEmpty()) return chapter.byteLength
-        return cellUnits[cell.coerceIn(0, cellUnits.lastIndex)]
+        text = ReaderText.chapterView(chapter, config.charsPerLine)
+        if (neighbourIndex != chapterIndex - 1 && neighbourIndex != chapterIndex + 1) {
+            neighbour = null
+            neighbourIndex = -1
+        }
     }
 }

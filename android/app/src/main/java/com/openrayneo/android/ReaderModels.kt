@@ -4,6 +4,7 @@ package com.openrayneo.android
 
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
 
 /** 一本已导入小说的元数据与阅读状态。位置单位统一为全书 UTF-8 字节，对齐提词器 pageOffset／highLightOffset。 */
 internal data class Book(
@@ -34,19 +35,37 @@ internal data class Book(
     }
 }
 
-/** 单章文本、全书字节区间与手机端规整行。lines 只服务手机排版，不承担眼镜对齐职责。 */
+/**
+ * 单章：只有全书字节区间与标题，**不持有正文**。
+ * 长篇小说整本正文有十几 MB，逐章切片会让全书在堆上驻留两遍；正文一律按需从磁盘区间读取。
+ */
 internal data class Chapter(
     val index: Int,
     val title: String,
-    val rawContent: String,
     val byteStart: Int,
     val byteEnd: Int,
-    val lines: List<String> = emptyList(),
+    /** 正文文件路径。大纲与正文一一对应，由 [ReaderRepository] 构造章节时填入。 */
+    val filePath: String = "",
 ) {
     val byteLength: Int get() = byteEnd - byteStart
 
+    /** 本章正文的原始 UTF-8 字节。只读本章，不加载全书。 */
+    fun readBytes(): ByteArray {
+        if (byteLength <= 0) return ByteArray(0)
+        require(filePath.isNotEmpty()) { "章节缺少正文路径" }
+        RandomAccessFile(filePath, "r").use { file ->
+            val bytes = ByteArray(byteLength)
+            file.seek(byteStart.toLong())
+            file.readFully(bytes)
+            return bytes
+        }
+    }
+
+    /** 按区间读出本章原文。章节区间与导入时归一化后的正文同一坐标系，读出的就是原文。 */
+    fun text(): String = String(readBytes(), Charsets.UTF_8)
+
     fun cellCount(charsPerLine: Int = ReaderConfig().charsPerLine): Int =
-        ReaderText.cellCount(this, charsPerLine)
+        ReaderText.cellCount(text(), charsPerLine)
 }
 
 internal data class ReaderConfig(

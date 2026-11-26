@@ -39,6 +39,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -52,12 +54,14 @@ internal fun FullScreenReaderScreen(
     onSeek: (chapterIndex: Int, byteOffsetInChapter: Int) -> Unit,
     onBack: () -> Unit,
     onNotice: (String) -> Unit,
+    onError: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val repository = remember { ReaderRepository(context) }
     var config by remember { mutableStateOf(preferences.config()) }
     var viewport by remember { mutableStateOf<ReaderViewport?>(null) }
     var chapterList by remember { mutableStateOf<List<Chapter>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
     // ReaderViewport 是可变对象，Compose 看不到它内部字段的变化；
     // 每次改动后递增 version，强制重新读取 chapterIndex／进度等派生值。
     var version by remember { mutableIntStateOf(0) }
@@ -66,21 +70,53 @@ internal fun FullScreenReaderScreen(
     var showSettings by remember { mutableStateOf(false) }
     var progressDrag by remember { mutableStateOf<Float?>(null) }
 
+    // 大纲与首章排版都在 IO 线程完成：长篇正文读取与切行不能让主线程停在白屏上。
     LaunchedEffect(book.id) {
-        val chapters = runCatching { repository.chapters(book, config) }.getOrElse { emptyList() }
-        if (chapters.isEmpty()) {
-            onNotice(L("这本书没有可阅读的正文", "This book has no readable text"))
-            onBack()
-            return@LaunchedEffect
+        loading = true
+        val result: Result<Pair<List<Chapter>, ReaderViewport>> = withContext(Dispatchers.IO) {
+            runCatching {
+                val chapters = repository.chapters(book)
+                if (chapters.isEmpty()) error(L("这本书没有可阅读的正文", "This book has no readable text"))
+                chapters to ReaderViewport(chapters, config).apply { seekBook(book.byteOffset) }
+            }
         }
-        chapterList = chapters
-        viewport = ReaderViewport(chapters, config).apply { seekBook(book.byteOffset) }
-        version++
+        loading = false
+        result.onSuccess { (chapters, loaded) ->
+            chapterList = chapters
+            viewport = loaded
+            version++
+        }.onFailure { error ->
+            // 旧实现把异常吞成空章节后静默返回，大书打不开时表现为白屏无提示。
+            onError(error.message ?: L("这本书打不开", "This book cannot be opened"))
+            onBack()
+        }
     }
 
     val listState = rememberLazyListState()
     val focus = remember { FocusRequester() }
-    val current = viewport ?: return
+    val current = viewport
+    if (current == null) {
+        // 大书读盘与首章排版在 IO 线程跑，这里必须给一个可见的等待态，而不是白屏。
+        Box(Modifier.fillMaxSize().background(tokens.pageBackground), contentAlignment = Alignment.Center) {
+            if (loading) CircularProgressIndicator()
+        }
+        return
+    }
+
+    // 高亮框要随每次翻页实时移动，两件事缺一不可：
+    //
+    // 1) 在本组合的主作用域读 version，本页才会订阅它。
+    //    version++ 写在事件回调里；主作用域没读过就收不到通知，
+    //    于是每次翻页只有正文（LazyColumn 自己滚动）动了，高亮框不动，
+    //    要等菜单弹出（另一个 State 变化）才连带刷新。
+    //
+    // 2) 高亮必须以 State 交给正文列表，让每个可见行自己去读。
+    //    LazyColumn 的可见 item 只在 item 内部读到的 State 变化时重组；
+    //    只传普通 IntRange 时 content lambda 会重建但 item 被跳过，
+    //    行字符串翻页时又没变，高亮看上去就不动。
+    val highlightRange = remember(version) { current.highlightRange() }
+    val highlight = remember { mutableStateOf(highlightRange) }
+    highlight.value = highlightRange
 
     // 拼在本章前面的上一章行数。必须与 ReaderBody 的拼接行数逐行一致，
     // 否则滚动锚点、高亮框、进度条三者的行下标会错位。
@@ -122,8 +158,6 @@ internal fun FullScreenReaderScreen(
         listState.animateScrollToItem(line.coerceAtLeast(0))
     }
 
-
-
     Box(
         Modifier
             .fillMaxSize()
@@ -146,7 +180,10 @@ internal fun FullScreenReaderScreen(
             viewport = current,
             prevLines = prevLines,
             listState = listState,
-            highlight = current.highlightRange(),
+            // 高亮范围必须以 State 传入：LazyColumn 的可见 item 只在捕获的 State 变化时重组，
+            // 本行内容（line 字符串）翻页时不变，普通参数变了下可见行不会刷新，
+            // 表现为高亮框不跟随视口，要等菜单弹出（其他状态变化）才跳过去。
+            highlight = highlight,
             onTapZone = { zone ->
                 when (zone) {
                     0 -> commit(false)
@@ -253,7 +290,7 @@ private fun ReaderBody(
     viewport: ReaderViewport,
     prevLines: Int,
     listState: LazyListState,
-    highlight: IntRange,
+    highlight: State<IntRange>,
     onTapZone: (Int) -> Unit,
     onSwipe: (Boolean) -> Unit,
 ) {
@@ -311,20 +348,32 @@ private fun ReaderBody(
             contentPadding = PaddingValues(horizontal = 22.dp, vertical = 40.dp),
         ) {
             if (prev.isNotEmpty()) {
-                itemsIndexed(prev) { _, line -> ReaderLine(line, lineHeight, false, false) }
+                itemsIndexed(prev, key = { index, _ -> "prev-$index" }) { _, line ->
+                    ReaderLine(line, lineHeight, false, false)
+                }
             }
-            itemsIndexed(lines) { index, line ->
+            // 每行一个稳定 key：三组 itemsIndexed 的下标都从 0 开始，没有 key 时
+            // 相邻章节的衔接行会与当前章同下标行互相复用组合实例，
+            // 高亮框变化也跟着被跳过——表现为「翻了页但高亮框不动，弹出菜单才刷新」。
+            itemsIndexed(lines, key = { index, _ -> "cur-${viewport.chapterIndex}-$index" }) { index, line ->
+                // 作为 item 自身读取的 State，而不是外层函数参数：
+                // LazyColumn 的可见 item 只在捕获的 State 变化时重组，普通参数变了不会刷新，
+                // 高亮框于是不跟随视口（要等菜单弹出才刷新）。
+                // 在 item 自己的组合里读 State，高亮一变这些行就会重组。
+                val range = highlight.value
                 ReaderLine(
                     line = line,
                     lineHeight = lineHeight,
-                    highlighted = index in highlight,
-                    isEdge = index == highlight.first || index == highlight.last,
+                    highlighted = index in range,
+                    isEdge = index == range.first || index == range.last,
                     // 标签跟着高亮框首行走，不再钉在屏幕顶部。
-                    label = if (index == highlight.first) L("眼镜同步视口", "Glasses viewport") else null,
+                    label = if (index == range.first) L("眼镜同步视口", "Glasses viewport") else null,
                 )
             }
             if (next.isNotEmpty()) {
-                itemsIndexed(next) { _, line -> ReaderLine(line, lineHeight, false, false) }
+                itemsIndexed(next, key = { index, _ -> "next-$index" }) { _, line ->
+                    ReaderLine(line, lineHeight, false, false)
+                }
             }
             item { Spacer(Modifier.height(120.dp)) }
         }

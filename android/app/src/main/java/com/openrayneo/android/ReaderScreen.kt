@@ -12,14 +12,26 @@ import androidx.compose.ui.platform.LocalContext
  * onSeek 预留给 Phase 3 推送到眼镜提词器。
  */
 @Composable
-internal fun ReaderScreen(importBook: () -> Unit, onSeek: (String, Int, Int) -> Unit = { _, _, _ -> }) {
+internal fun ReaderScreen(
+    importBook: () -> Unit,
+    onSeek: (String, Int, Int) -> Unit = { _, _, _ -> },
+    importing: Boolean = false,
+    libraryVersion: Int = 0,
+    onNotice: (String) -> Unit = {},
+    onError: (String) -> Unit = {},
+) {
     val context = LocalContext.current
     val preferences = remember { ReaderPreferences(context) }
     var reading by remember { mutableStateOf<Book?>(null) }
 
     val current = reading
     if (current == null) {
-        BookLibraryScreen(importBook = importBook, open = { book -> reading = book })
+        BookLibraryScreen(
+            importBook = importBook,
+            open = { book -> reading = book },
+            importing = importing,
+            libraryVersion = libraryVersion,
+        )
         return
     }
 
@@ -29,6 +41,8 @@ internal fun ReaderScreen(importBook: () -> Unit, onSeek: (String, Int, Int) -> 
         preferences = preferences,
         onSeek = { chapterIndex, byteOffsetInChapter -> onSeek(current.id, chapterIndex, byteOffsetInChapter) },
         onBack = { reading = null },
-        onNotice = { /* 由外层 Snackbar 承载时再接管；此处翻页越界无需打断阅读 */ },
+        // 翻页越界只是轻提示，不打断阅读；真正的打开／解析失败走 onError 让外层报错。
+        onNotice = onNotice,
+        onError = onError,
     )
 }

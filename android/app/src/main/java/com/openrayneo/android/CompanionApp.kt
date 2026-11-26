@@ -185,9 +185,16 @@ internal fun CompanionApp(model: AppModel, actions: UiActions) {
                 "teleprompter" -> TeleprompterScreen(model)
                 "agent-api" -> AgentServerScreen(model, actions.bluetoothPermission)
                 "reader" ->
-                    ReaderScreen(actions.importBook) { bookId, chapterIndex, byteOffsetInChapter ->
-                        actions.readerSeek(bookId, chapterIndex, byteOffsetInChapter)
-                    }
+                    ReaderScreen(
+                        importBook = actions.importBook,
+                        onSeek = { bookId, chapterIndex, byteOffsetInChapter ->
+                            actions.readerSeek(bookId, chapterIndex, byteOffsetInChapter)
+                        },
+                        importing = model.readerImporting,
+                        libraryVersion = model.libraryVersion,
+                        onNotice = { model.notice = it },
+                        onError = { model.error = it },
+                    )
                 else ->
                     if (model.onboarding)
                         OnboardingScreen(model, actions, { devices = true }, { route = it })

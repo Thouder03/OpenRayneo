@@ -16,8 +16,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
@@ -62,15 +64,29 @@ internal class MainActivity : ComponentActivity() {
         }
     private val importBook =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) model.attempt {
-                runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                val repository = ReaderRepository(this)
-                val book = repository.import(uri) { target ->
-                    contentResolver.openInputStream(target)?.use { it.readBytes() }
-                        ?: error("无法读取所选文件")
+            if (uri == null) return@registerForActivityResult
+            runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            // 导入是分块流式写盘：长篇 TXT 十几 MB，既不能整本读进内存，也不能放在主线程。
+            lifecycleScope.launch {
+                model.readerImporting = true
+                val result: Result<Pair<Book, Int>> = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val repository = ReaderRepository(this@MainActivity)
+                        val book = repository.import(uri) { target ->
+                            contentResolver.openInputStream(target) ?: error("无法读取所选文件")
+                        }
+                        book to repository.chapters(book).size
+                    }
                 }
-                val chapters = repository.chapters(book, ReaderConfig())
-                model.notice = "已导入《${book.title}》，共 ${chapters.size} 章、${book.totalBytes} 字节"
+                model.readerImporting = false
+                result
+                    .onSuccess { (book, count) ->
+                        model.notice = "已导入《${book.title}》，共 $count 章、${book.totalBytes} 字节"
+                        model.refreshLibrary()
+                    }
+                    .onFailure { error ->
+                        model.error = error.message ?: L("导入失败", "Import failed")
+                    }
             }
         }
     private val speech =

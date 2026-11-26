@@ -167,6 +167,17 @@ internal class AppModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /** 小说导入进行中：IO 线程流式写盘，书架页据此显示进度。 */
+    var readerImporting by mutableStateOf(false)
+
+    /** 导入完成后通知书架重新读盘（书架只在 ON_RESUME 时自行刷新，不覆盖导入完成这一刻）。 */
+    var libraryVersion by mutableIntStateOf(0)
+        private set
+
+    fun refreshLibrary() {
+        libraryVersion++
+    }
+
     fun service(): BridgeService = checkNotNull(bridge) { "连接服务正在准备，请稍后重试" }
 
     private fun refresh() {

@@ -8,12 +8,17 @@ import android.util.AtomicFile
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 /**
- * 书架、章节解析与阅读进度的本地来源。
- * 书籍正文落在 filesDir/books/<id>.txt，书架与阅读进度落在 filesDir/books/library.json。
+ * 书架、章节大纲与阅读进度的本地来源。
+ * 书籍正文落在 filesDir/books/<id>.txt，章节大纲落在 books/<id>.outline.json，
+ * 书架与阅读进度落在 filesDir/books/library.json。
+ *
+ * 正文一律按需要读取单章区间，不在内存里保留全书副本——长篇 TXT 动辄十几 MB。
  */
 internal class ReaderRepository(context: Context) {
 
@@ -33,26 +38,59 @@ internal class ReaderRepository(context: Context) {
     fun book(id: String): Book? = books().firstOrNull { it.id == id }
 
     /**
-     * 通过 SAF 导入：解码正文、统一为规范形式、估算章节并登记到书架。
-     * 落盘内容与 totalBytes 一律取自同一份规范文本，确保全书字节数等于各章区间之和。
+     * 通过 SAF 导入：边读边归一化写入落盘正文，同时单遍收集章节大纲。
+     * 内存里只有一行滑动窗口和章节标题，与文件大小无关。
      */
-    fun import(uri: Uri, open: (Uri) -> ByteArray): Book {
-        val text = ReaderChapterParser.normalize(decode(open(uri)))
-        require(text.isNotBlank()) { "所选文件没有可阅读的正文" }
-        val payload = text.toByteArray(Charsets.UTF_8)
+    fun import(uri: Uri, open: (Uri) -> java.io.InputStream): Book {
         val id = UUID.randomUUID().toString()
         val target = File(folder, "$id.txt")
-        writeAtomic(target, payload)
-        val chapters = ReaderChapterParser.parseChapters(text, ReaderConfig().charsPerLine)
+        val outlineFile = File(folder, "$id.outline.json")
+        val scan = try {
+            open(uri).use { input ->
+                BufferedOutputStream(FileOutputStream(target), 1 shl 16).use { out ->
+                    ReaderChapterParser.scan(input) { bytes -> out.write(bytes) }
+                }
+            }
+        } catch (error: Throwable) {
+            target.delete()
+            outlineFile.delete()
+            throw error
+        }
+        require(scan.totalBytes > 0) { "所选文件没有可阅读的正文" }
+        writeAtomic(outlineFile, outlineJson(scan.outline).toByteArray(Charsets.UTF_8))
         val book = Book(
             id = id,
-            title = titleOf(uri) ?: chapters.firstOrNull()?.title?.take(40) ?: "未命名小说",
+            title = titleOf(uri) ?: scan.firstLine.takeIf { it.isNotBlank() }?.take(40) ?: "未命名小说",
             filePath = target.absolutePath,
-            totalBytes = payload.size,
+            totalBytes = scan.totalBytes,
         )
         writeLibrary(listOf(book) + books().filter { it.id != id })
         return book
     }
+
+    /** 大纲（章节标题与字节区间）。缺失时按已落盘正文补扫一次，兼容旧版导入的书。 */
+    fun outline(book: Book): List<ReaderChapterParser.Outline> {
+        val outlineFile = outlineFile(book)
+        if (outlineFile.isFile) {
+            val parsed = runCatching { readOutline(outlineFile) }.getOrNull()
+            if (!parsed.isNullOrEmpty()) return parsed
+        }
+        // 旧版本没有大纲文件：重新流式扫一遍正文（不载入内存）后落盘。
+        val scan = File(book.filePath).inputStream().use { input ->
+            ReaderChapterParser.scan(input) { /* 只扫大纲，丢弃输出 */ }
+        }
+        val outline = scan.outline.ifEmpty {
+            listOf(ReaderChapterParser.Outline(book.title, 0, scan.totalBytes))
+        }
+        runCatching { writeAtomic(outlineFile, outlineJson(outline).toByteArray(Charsets.UTF_8)) }
+        return outline
+    }
+
+    /** 按大纲构造章节；正文路径随章节一起带上，正文按需从磁盘读取。 */
+    fun chapters(book: Book): List<Chapter> =
+        outline(book).mapIndexed { index, item ->
+            Chapter(index, item.title, item.byteStart, item.byteEnd, book.filePath)
+        }
 
     /** 记录阅读进度；byteOffset 按所在章的字节区间收敛，避免越界值写进书架。 */
     fun updateProgress(id: String, chapterIndex: Int, byteOffset: Int, chapters: List<Chapter>): Book {
@@ -68,19 +106,12 @@ internal class ReaderRepository(context: Context) {
     }
 
     fun remove(id: String) {
-        book(id)?.let { File(it.filePath).delete() }
+        val book = book(id)
+        if (book != null) {
+            File(book.filePath).delete()
+            outlineFile(book).delete()
+        }
         writeLibrary(books().filter { it.id != id })
-    }
-
-    fun readBookText(book: Book): String = File(book.filePath).readText()
-
-    /** 按当前排版参数解析章节；解析不出章节时退回整本一章，保证永远有内容可读。 */
-    fun chapters(book: Book, config: ReaderConfig): List<Chapter> {
-        val text = ReaderChapterParser.normalize(readBookText(book))
-        val parsed = ReaderChapterParser.parseChapters(text, config.charsPerLine)
-        if (parsed.isNotEmpty()) return parsed
-        val bytes = text.toByteArray(Charsets.UTF_8).size
-        return listOf(Chapter(0, book.title, text, 0, bytes, ReaderText.formatLines(text, config.charsPerLine)))
     }
 
     /** 全书字节偏移 → (章节, 章内字节偏移)。用于提词会话与视口换算。 */
@@ -88,6 +119,33 @@ internal class ReaderRepository(context: Context) {
         if (chapters.isEmpty()) error("本书没有可阅读的章节")
         val chapter = chapters.lastOrNull { it.byteStart <= byteOffset } ?: chapters.first()
         return chapter to (byteOffset - chapter.byteStart).coerceIn(0, chapter.byteLength)
+    }
+
+    private fun outlineFile(book: Book): File = File(folder, "${book.id}.outline.json")
+
+    private fun outlineJson(outline: List<ReaderChapterParser.Outline>): String {
+        val array = JSONArray()
+        outline.forEach { item ->
+            array.put(
+                JSONObject()
+                    .put("title", item.title)
+                    .put("byteStart", item.byteStart)
+                    .put("byteEnd", item.byteEnd),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun readOutline(file: File): List<ReaderChapterParser.Outline> {
+        val array = JSONArray(file.readText())
+        return (0 until array.length()).map { index ->
+            val item = array.getJSONObject(index)
+            ReaderChapterParser.Outline(
+                item.getString("title"),
+                item.getInt("byteStart"),
+                item.getInt("byteEnd"),
+            )
+        }
     }
 
     private fun readLibrary(): List<Book> {
@@ -127,14 +185,6 @@ internal class ReaderRepository(context: Context) {
     private fun titleOf(uri: Uri): String? =
         runCatching { uri.lastPathSegment?.substringAfterLast('/') }.getOrNull()
             ?.substringBeforeLast('.')?.trim()?.takeIf { it.isNotEmpty() }?.take(40)
-
-    /** 先按 UTF-8 严格解码，失败再尝试 GB18030，最后回退 UTF-8 有损解码。 */
-    private fun decode(bytes: ByteArray): String {
-        val buffer = java.nio.ByteBuffer.wrap(bytes)
-        runCatching { Charsets.UTF_8.newDecoder().decode(buffer.duplicate()).toString() }.onSuccess { return it }
-        runCatching { charset("GB18030").newDecoder().decode(buffer.duplicate()).toString() }.onSuccess { return it }
-        return String(bytes, Charsets.UTF_8)
-    }
 }
 
 /** 阅读配置的本地持久化，沿用 AppSettings 的 SharedPreferences 分支但不需要加密。 */

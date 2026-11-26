@@ -6,14 +6,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 class ReaderViewportTest {
 
+    /**
+     * 章节不再持有正文：把合并后的正文落到一个临时文件，章节只保留各自的字节区间。
+     * 这与生产路径一致——正文按区间从磁盘读取。
+     */
     private fun chapters(vararg texts: String): List<Chapter> {
+        val file = File(Files.createTempDirectory("viewport").toFile(), "book.txt")
+        file.writeBytes(texts.joinToString("").toByteArray(Charsets.UTF_8))
+        file.deleteOnExit()
         var cursor = 0
         return texts.mapIndexed { index, text ->
             val bytes = text.toByteArray(Charsets.UTF_8).size
-            Chapter(index, "第${index + 1}章", text, cursor, cursor + bytes).also { cursor += bytes }
+            Chapter(index, "第${index + 1}章", cursor, cursor + bytes, file.absolutePath).also { cursor += bytes }
         }
     }
 
@@ -151,11 +160,11 @@ class ReaderViewportTest {
     @Test
     fun seekLineLandsOnRequestedLineHead() {
         val chapter = chapters("测".repeat(100), "下一章").first()
-        val lines = ReaderText.linesOf(chapter, config.charsPerLine)
+        val lines = ReaderText.linesOf(chapter.text(), config.charsPerLine)
         val viewport = ReaderViewport(listOf(chapter), config)
         viewport.seekLine(3)
         assertEquals(3, viewport.lineIndex)
-        assertEquals(ReaderText.lineByteStart(chapter, 3, lines), viewport.byteOffsetInChapter)
+        assertEquals(ReaderText.lineByteStart(chapter, 3, lines, config.charsPerLine), viewport.byteOffsetInChapter)
     }
 
     @Test
